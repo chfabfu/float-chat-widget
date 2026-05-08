@@ -1,4 +1,4 @@
-# Claude Code Web (float-chat-widget)
+# float-chat-widget
 
 A floating desktop assistant for [Claude Code](https://claude.ai/code), built with Electron.
 
