@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude Code Web</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
+</head>
+<body>
+  <!-- Floating toggle button -->
+  <button id="floatToggle" title="Claude Code">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    </svg>
+  </button>
+
+  <!-- Floating chat panel -->
+  <div id="chatPanel" class="chat-panel">
+    <!-- Drag handle -->
+    <div id="dragHandle" class="drag-handle">
+      <div class="drag-left">
+        <button id="toggleSidebar" class="icon-btn" title="History">&#9776;</button>
+        <span class="panel-title">Claude Code</span>
+        <span id="status" class="status disconnected">Offline</span>
+      </div>
+      <div class="drag-right">
+        <button id="ballBtn" class="icon-btn" title="Float Ball">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>
+        </button>
+        <button id="minimizeBtn" class="icon-btn" title="Minimize">&ndash;</button>
+        <button id="maximizeBtn" class="icon-btn" title="Maximize">&#9723;</button>
+        <button id="closeBtn" class="icon-btn" title="Close">&times;</button>
+      </div>
+    </div>
+
+    <div class="panel-body">
+      <!-- Sidebar -->
+      <aside id="sidebar">
+        <div id="sessionList" class="session-list"></div>
+      </aside>
+
+      <!-- Main chat area -->
+      <div class="chat-main">
+        <main id="messages"></main>
+
+        <footer>
+          <div class="input-area">
+            <textarea id="input" placeholder="Enter to send, Shift+Enter for newline" rows="1"></textarea>
+            <button id="newChat" class="icon-btn" title="New Chat">+</button>
+            <button id="send" title="Send">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/>
+              </svg>
+            </button>
+          </div>
+          <div id="info" class="info"></div>
+        </footer>
+      </div>
+    </div>
+  </div>
+
+  <!-- Floating ball (hidden by default) -->
+  <div id="floatBall" class="float-ball" title="Click to open">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    </svg>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

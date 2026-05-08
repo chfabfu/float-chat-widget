@@ -1,0 +1,426 @@
+(() => {
+  // ── DOM refs ──
+  const messagesEl = document.getElementById("messages");
+  const inputEl = document.getElementById("input");
+  const sendBtn = document.getElementById("send");
+  const statusEl = document.getElementById("status");
+  const infoEl = document.getElementById("info");
+  const newChatBtn = document.getElementById("newChat");
+  const sidebar = document.getElementById("sidebar");
+  const sessionListEl = document.getElementById("sessionList");
+  const toggleSidebarBtn = document.getElementById("toggleSidebar");
+  const floatToggle = document.getElementById("floatToggle");
+  const chatPanel = document.getElementById("chatPanel");
+  const dragHandle = document.getElementById("dragHandle");
+  const minimizeBtn = document.getElementById("minimizeBtn");
+  const maximizeBtn = document.getElementById("maximizeBtn");
+  const closeBtn = document.getElementById("closeBtn");
+  const ballBtn = document.getElementById("ballBtn");
+  const floatBall = document.getElementById("floatBall");
+
+  document.body.classList.add("electron");
+
+  let isGenerating = false;
+  let currentAssistantEl = null;
+  let currentBubbleEl = null;
+  let currentText = "";
+  let activeSessionId = null;
+  let generationId = 0;
+  let activeGen = 0;
+
+  let totalInputTokens = 0, totalOutputTokens = 0, totalCacheRead = 0, totalCacheCreation = 0, turnCount = 0;
+
+  marked.setOptions({
+    highlight: (code, lang) => {
+      if (lang && hljs.getLanguage(lang)) return hljs.highlight(code, { language: lang }).value;
+      return hljs.highlightAuto(code).value;
+    },
+    breaks: true,
+  });
+
+  // ════════════════════════════════════════
+  // ── Window controls ──
+  // ════════════════════════════════════════
+
+  floatToggle.style.display = "none";
+
+  minimizeBtn.addEventListener("click", () => window.api.minimize());
+  maximizeBtn.addEventListener("click", () => window.api.maximize());
+  closeBtn.addEventListener("click", () => window.api.close());
+
+  floatToggle.addEventListener("click", () => {
+    chatPanel.classList.remove("hidden");
+    floatToggle.classList.add("hidden");
+    inputEl.focus();
+  });
+
+  // Drag handle
+  let isDragging = false, dragOffsetX = 0, dragOffsetY = 0;
+  dragHandle.addEventListener("mousedown", (e) => {
+    if (e.target.closest(".icon-btn")) return;
+    if (chatPanel.classList.contains("maximized")) return;
+    isDragging = true;
+    const rect = chatPanel.getBoundingClientRect();
+    dragOffsetX = e.clientX - rect.left;
+    dragOffsetY = e.clientY - rect.top;
+    dragHandle.style.cursor = "grabbing";
+  });
+  document.addEventListener("mousemove", (e) => {
+    if (!isDragging) return;
+    let x = e.clientX - dragOffsetX, y = e.clientY - dragOffsetY;
+    x = Math.max(0, Math.min(x, window.innerWidth - chatPanel.offsetWidth));
+    y = Math.max(0, Math.min(y, window.innerHeight - chatPanel.offsetHeight));
+    chatPanel.style.left = x + "px";
+    chatPanel.style.top = y + "px";
+    chatPanel.style.right = "auto";
+    chatPanel.style.bottom = "auto";
+  });
+  document.addEventListener("mouseup", () => { isDragging = false; dragHandle.style.cursor = "move"; });
+
+  // ════════════════════════════════════════
+  // ── Ball mode ──
+  // ════════════════════════════════════════
+
+  let isBallMode = false, ignoreMouseTimer = null;
+
+  ballBtn.addEventListener("click", () => {
+    isBallMode = true;
+    document.body.classList.add("ball-mode");
+    window.api.toBall();
+  });
+
+  floatBall.addEventListener("mouseenter", () => {
+    if (!isBallMode) return;
+    clearTimeout(ignoreMouseTimer);
+    window.api.setIgnoreMouse(false);
+  });
+  floatBall.addEventListener("mouseleave", () => {
+    if (!isBallMode || ballDragging) return;
+    ignoreMouseTimer = setTimeout(() => { if (isBallMode) window.api.setIgnoreMouse(true); }, 200);
+  });
+
+  function restoreFromBall() {
+    isBallMode = false;
+    clearTimeout(ignoreMouseTimer);
+    ballDragging = false;
+    floatBall.style.left = "";
+    floatBall.style.top = "";
+    floatBall.style.transform = "";
+    window.api.fromBall().then(() => { document.body.classList.remove("ball-mode"); });
+    inputEl.focus();
+  }
+
+  let ballDragging = false, ballDragStartX = 0, ballDragStartY = 0;
+  floatBall.addEventListener("mousedown", (e) => {
+    ballDragging = false;
+    ballDragStartX = e.clientX;
+    ballDragStartY = e.clientY;
+    const onMove = (ev) => {
+      if (Math.abs(ev.clientX - ballDragStartX) > 3 || Math.abs(ev.clientY - ballDragStartY) > 3) ballDragging = true;
+      if (ballDragging) {
+        floatBall.style.left = ev.clientX - 30 + "px";
+        floatBall.style.top = ev.clientY - 30 + "px";
+        floatBall.style.transform = "none";
+      }
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      if (!ballDragging) restoreFromBall();
+      else ballDragging = false;
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+
+  // ════════════════════════════════════════
+  // ── Sidebar ──
+  // ════════════════════════════════════════
+
+  toggleSidebarBtn.addEventListener("click", () => sidebar.classList.toggle("collapsed"));
+
+  async function loadSessions() {
+    try {
+      const sessions = await window.api.sessionsList();
+      renderSessions(sessions);
+    } catch (e) {}
+  }
+
+  function renderSessions(sessions) {
+    sessionListEl.innerHTML = "";
+    if (!sessions.length) {
+      sessionListEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:12px">No history</div>';
+      return;
+    }
+    for (const s of sessions) {
+      const el = document.createElement("div");
+      el.className = "session-item" + (s.id === activeSessionId ? " active" : "");
+      el.innerHTML = `
+        <div class="session-top">
+          <div class="session-preview">${escapeHtml(s.preview || "(empty)")}</div>
+          <button class="delete-btn" title="Delete">&#10005;</button>
+        </div>
+        <div class="session-time">${formatTime(s.timestamp)}</div>`;
+      el.querySelector(".session-top").addEventListener("click", (e) => {
+        if (e.target.closest(".delete-btn")) return;
+        resumeSession(s.id);
+      });
+      el.querySelector(".delete-btn").addEventListener("click", (e) => {
+        e.stopPropagation();
+        deleteSession(s.id, el);
+      });
+      sessionListEl.appendChild(el);
+    }
+  }
+
+  async function deleteSession(id, el) {
+    await window.api.sessionsDelete(id);
+    el.remove();
+    if (activeSessionId === id) { activeSessionId = null; resetStats(); showWelcome(); }
+    loadSessions();
+  }
+
+  function formatTime(iso) {
+    const d = new Date(iso), now = new Date(), diff = now - d;
+    const m = Math.floor(diff / 60000), h = Math.floor(diff / 3600000), dy = Math.floor(diff / 86400000);
+    if (m < 1) return "just now";
+    if (m < 60) return `${m}m ago`;
+    if (h < 24) return `${h}h ago`;
+    if (dy < 7) return `${dy}d ago`;
+    return d.toLocaleDateString("zh-CN");
+  }
+
+  async function resumeSession(id) {
+    if (isGenerating) {
+      isGenerating = false;
+      activeGen = 0;
+      sendBtn.disabled = false;
+    }
+    activeSessionId = id;
+    messagesEl.innerHTML = "";
+    resetStats();
+
+    window.api.resume(id);
+
+    try {
+      const messages = await window.api.sessionsMessages(id);
+      if (activeSessionId !== id) return;
+      messagesEl.innerHTML = "";
+      for (const msg of messages) {
+        if (msg.role === "user") addUserMessage(msg.content);
+        else if (msg.role === "assistant") renderAssistantParts(msg.parts);
+      }
+    } catch (e) {}
+    highlightActiveSession();
+  }
+
+  function renderAssistantParts(parts) {
+    clearWelcome();
+    const el = document.createElement("div");
+    el.className = "message assistant";
+    el.innerHTML = `<div class="role">Claude</div>`;
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    let textBuf = "";
+    for (const part of parts) {
+      if (part.type === "text") { textBuf += part.text; continue; }
+      if (textBuf) { appendMarkdown(bubble, textBuf); textBuf = ""; }
+      if (part.type === "tool_use") {
+        const block = document.createElement("div");
+        block.className = "tool-block";
+        block.innerHTML = `
+          <div class="tool-header" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
+            <span class="tool-icon">&#9881;</span>
+            <span class="tool-name">${escapeHtml(part.name)}</span>
+            <span class="tool-arrow">&#9654;</span>
+          </div>
+          <div class="tool-body">${escapeHtml(JSON.stringify(part.input, null, 2))}</div>`;
+        bubble.appendChild(block);
+      } else if (part.type === "thinking") {
+        const think = document.createElement("div");
+        think.className = "thinking-block";
+        think.innerHTML = `<div class="thinking-label">Thinking</div>${marked.parse(part.text)}`;
+        bubble.appendChild(think);
+      }
+    }
+    if (textBuf) appendMarkdown(bubble, textBuf);
+    el.appendChild(bubble);
+    messagesEl.appendChild(el);
+    scrollToBottom();
+  }
+
+  function appendMarkdown(container, text) {
+    const t = document.createElement("div");
+    t.innerHTML = marked.parse(text);
+    highlightAllCode(t);
+    container.appendChild(t);
+  }
+
+  function highlightActiveSession() {
+    sessionListEl.querySelectorAll(".session-item").forEach(el => el.classList.remove("active"));
+    loadSessions();
+  }
+
+  // ════════════════════════════════════════
+  // ── Messages ──
+  // ════════════════════════════════════════
+
+  function setStatus(state, text) { statusEl.className = `status ${state}`; statusEl.textContent = text; }
+
+  function showWelcome() {
+    messagesEl.innerHTML = `<div class="welcome"><h2>Claude Code</h2><p>Type a message below to start chatting.</p></div>`;
+  }
+  function clearWelcome() { const w = messagesEl.querySelector(".welcome"); if (w) w.remove(); }
+
+  function addUserMessage(text) {
+    clearWelcome();
+    const el = document.createElement("div");
+    el.className = "message user";
+    el.innerHTML = `<div class="role">You</div><div class="bubble">${escapeHtml(text)}</div>`;
+    messagesEl.appendChild(el);
+    scrollToBottom();
+  }
+
+  function startAssistantMessage() {
+    clearWelcome();
+    const el = document.createElement("div");
+    el.className = "message assistant";
+    el.innerHTML = `<div class="role">Claude</div><div class="bubble"><div class="typing-indicator"><span></span><span></span><span></span></div></div>`;
+    messagesEl.appendChild(el);
+    currentAssistantEl = el;
+    currentBubbleEl = el.querySelector(".bubble");
+    currentText = "";
+    scrollToBottom();
+  }
+
+  function appendText(text) {
+    if (!currentBubbleEl) return;
+    currentText += text;
+    currentBubbleEl.innerHTML = marked.parse(currentText);
+    highlightAllCode(currentBubbleEl);
+    scrollToBottom();
+  }
+
+  function appendThinking(text) {
+    if (!currentBubbleEl) return;
+    const el = document.createElement("div");
+    el.className = "thinking-block";
+    el.innerHTML = `<div class="thinking-label">Thinking</div>${marked.parse(text)}`;
+    currentBubbleEl.appendChild(el);
+    scrollToBottom();
+  }
+
+  function appendToolUse(tool) {
+    if (!currentBubbleEl) return;
+    const block = document.createElement("div");
+    block.className = "tool-block";
+    block.innerHTML = `
+      <div class="tool-header" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
+        <span class="tool-icon">&#9881;</span>
+        <span class="tool-name">${escapeHtml(tool.name)}</span>
+        <span class="tool-arrow">&#9654;</span>
+      </div>
+      <div class="tool-body">${escapeHtml(JSON.stringify(tool.input, null, 2))}</div>`;
+    currentBubbleEl.appendChild(block);
+    scrollToBottom();
+  }
+
+  function finalizeAssistant(usage) {
+    if (currentBubbleEl) { const i = currentBubbleEl.querySelector(".typing-indicator"); if (i) i.remove(); }
+    if (usage) {
+      turnCount++;
+      totalInputTokens += usage.input_tokens || 0;
+      totalOutputTokens += usage.output_tokens || 0;
+      totalCacheRead += usage.cache_read_input_tokens || 0;
+      totalCacheCreation += usage.cache_creation_input_tokens || 0;
+      updateStatsDisplay();
+    }
+    currentAssistantEl = null; currentBubbleEl = null; currentText = "";
+    loadSessions();
+  }
+
+  function updateStatsDisplay() {
+    infoEl.innerHTML =
+      `<span>Turn ${turnCount}</span><span class="stats-sep">|</span>` +
+      `<span>In: ${totalInputTokens.toLocaleString()}</span><span class="stats-sep">|</span>` +
+      `<span>Out: ${totalOutputTokens.toLocaleString()}</span><span class="stats-sep">|</span>` +
+      `<span>Cache: ${totalCacheRead.toLocaleString()}</span>`;
+  }
+
+  function resetStats() {
+    totalInputTokens = 0; totalOutputTokens = 0; totalCacheRead = 0; totalCacheCreation = 0; turnCount = 0;
+    infoEl.textContent = "";
+  }
+
+  function highlightAllCode(c) { c.querySelectorAll("pre code:not(.hljs)").forEach(b => hljs.highlightElement(b)); }
+  function escapeHtml(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+  function scrollToBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+
+  // ════════════════════════════════════════
+  // ── Claude connection (IPC) ──
+  // ════════════════════════════════════════
+
+  window.api.onInit(() => {});
+  window.api.onText((t) => { if (activeGen === generationId) appendText(t); });
+  window.api.onTool((d) => { if (activeGen === generationId) appendToolUse(d); });
+  window.api.onThinking((t) => { if (activeGen === generationId) appendThinking(t); });
+  window.api.onDone((d) => {
+    if (activeGen !== generationId) return;
+    activeGen = 0;
+    finalizeAssistant(d.usage);
+    isGenerating = false;
+    sendBtn.disabled = false;
+    inputEl.focus();
+  });
+  window.api.onError((msg) => {
+    if (activeGen !== generationId) return;
+    activeGen = 0;
+    appendText(`\n\n**Error:** ${escapeHtml(msg)}`);
+    isGenerating = false;
+    sendBtn.disabled = false;
+  });
+  setStatus("connected", "Ready");
+  sendBtn.disabled = false;
+  loadSessions();
+
+  // ════════════════════════════════════════
+  // ── Send message ──
+  // ════════════════════════════════════════
+
+  function sendMessage() {
+    const text = inputEl.value.trim();
+    if (!text || isGenerating) return;
+    isGenerating = true;
+    generationId++;
+    activeGen = generationId;
+    sendBtn.disabled = true;
+    infoEl.textContent = "";
+    addUserMessage(text);
+    startAssistantMessage();
+
+    window.api.chat(text);
+    inputEl.value = "";
+    autoResize();
+  }
+
+  function autoResize() {
+    inputEl.style.height = "auto";
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + "px";
+  }
+
+  sendBtn.addEventListener("click", sendMessage);
+  inputEl.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
+  inputEl.addEventListener("input", autoResize);
+
+  newChatBtn.addEventListener("click", () => {
+    window.api.newSession();
+    isGenerating = false;
+    activeGen = 0;
+    activeSessionId = null;
+    resetStats();
+    showWelcome();
+    loadSessions();
+  });
+
+  showWelcome();
+})();

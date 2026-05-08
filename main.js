@@ -1,0 +1,231 @@
+const { app, BrowserWindow, Tray, Menu, nativeImage, screen, ipcMain } = require("electron");
+const path = require("path");
+const fs = require("fs");
+const os = require("os");
+const { spawn } = require("child_process");
+const readline = require("readline");
+
+let mainWindow = null;
+let tray = null;
+
+// ── Session storage ──
+const HOME = os.homedir();
+const PROJECT_DIR = process.cwd().replace(/[^a-zA-Z0-9]/g, "-");
+const SESSIONS_DIR = path.join(HOME, ".claude", "projects", PROJECT_DIR);
+
+const CLAUDE_CMD =
+  process.platform === "win32"
+    ? path.join(process.env.APPDATA || "", "npm", "claude.cmd")
+    : "claude";
+
+// ── Tray ──
+function createTray() {
+  const size = 16;
+  const canvas = Buffer.alloc(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = x - size / 2, dy = y - size / 2;
+      const i = (y * size + x) * 4;
+      if (Math.sqrt(dx * dx + dy * dy) < size / 2 - 1) {
+        canvas[i] = 233; canvas[i + 1] = 69; canvas[i + 2] = 96; canvas[i + 3] = 255;
+      }
+    }
+  }
+  tray = new Tray(nativeImage.createFromBuffer(canvas, { width: size, height: size }));
+  tray.setToolTip("Claude Code");
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: "Show", click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
+    { label: "Hide", click: () => { if (mainWindow) mainWindow.hide(); } },
+    { type: "separator" },
+    { label: "Quit", click: () => { app.quit(); } },
+  ]));
+  tray.on("click", () => {
+    if (mainWindow) mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
+  });
+}
+
+// ── Window ──
+function createWindow() {
+  const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize;
+  mainWindow = new BrowserWindow({
+    width: 420, height: 600,
+    x: screenW - 460, y: screenH - 640,
+    frame: false, transparent: true, alwaysOnTop: true,
+    skipTaskbar: false, resizable: true, hasShadow: true,
+    webPreferences: {
+      nodeIntegration: false, contextIsolation: true,
+      preload: path.join(__dirname, "preload.js"),
+    },
+  });
+  mainWindow.setMenu(null);
+  mainWindow.loadFile(path.join(__dirname, "public", "index.html"));
+  mainWindow.setAlwaysOnTop(true, "floating");
+  mainWindow.on("closed", () => { mainWindow = null; });
+}
+
+// ── Window IPC ──
+ipcMain.on("win-minimize", () => { if (mainWindow) mainWindow.minimize(); });
+ipcMain.on("win-maximize", () => {
+  if (mainWindow) mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();
+});
+ipcMain.on("win-close", () => { app.quit(); });
+
+let savedBounds = null;
+ipcMain.on("win-to-ball", () => {
+  if (!mainWindow) return;
+  savedBounds = mainWindow.getBounds();
+  mainWindow.setOpacity(0);
+  const { x, y, width, height } = screen.getPrimaryDisplay().bounds;
+  mainWindow.setBounds({ x, y, width, height });
+  mainWindow.setResizable(false);
+  mainWindow.setHasShadow(false);
+  mainWindow.setIgnoreMouseEvents(true, { forward: true });
+  setTimeout(() => { if (mainWindow) mainWindow.setOpacity(1); }, 80);
+});
+ipcMain.handle("win-from-ball", () => {
+  if (!mainWindow) return;
+  mainWindow.setOpacity(0);
+  if (savedBounds) { mainWindow.setBounds(savedBounds); savedBounds = null; }
+  mainWindow.setResizable(true);
+  mainWindow.setHasShadow(true);
+  mainWindow.setIgnoreMouseEvents(false);
+  setTimeout(() => { if (mainWindow) mainWindow.setOpacity(1); }, 80);
+});
+ipcMain.on("set-ignore-mouse", (e, ignore) => {
+  if (!mainWindow) return;
+  ignore ? mainWindow.setIgnoreMouseEvents(true, { forward: true }) : mainWindow.setIgnoreMouseEvents(false);
+});
+
+// ── Sessions API (IPC, no HTTP) ──
+ipcMain.handle("sessions-list", () => {
+  try {
+    if (!fs.existsSync(SESSIONS_DIR)) return [];
+    const files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith(".jsonl"));
+    const sessions = files.map(file => {
+      const id = file.replace(".jsonl", "");
+      const filePath = path.join(SESSIONS_DIR, file);
+      const stat = fs.statSync(filePath);
+      let preview = "", timestamp = stat.mtime.toISOString();
+      try {
+        for (const line of fs.readFileSync(filePath, "utf-8").split("\n")) {
+          if (!line.trim()) continue;
+          const obj = JSON.parse(line);
+          if (obj.type === "user" && obj.message?.content) {
+            const c = obj.message.content;
+            preview = typeof c === "string" ? c : JSON.stringify(c);
+            timestamp = obj.timestamp || timestamp;
+            break;
+          }
+        }
+      } catch (e) {}
+      return { id, preview: preview.slice(0, 80), timestamp };
+    });
+    sessions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    return sessions;
+  } catch (err) { return []; }
+});
+
+ipcMain.handle("sessions-messages", (e, id) => {
+  try {
+    const filePath = path.join(SESSIONS_DIR, id + ".jsonl");
+    if (!fs.existsSync(filePath)) return [];
+    const messages = [];
+    for (const line of fs.readFileSync(filePath, "utf-8").split("\n")) {
+      if (!line.trim()) continue;
+      const obj = JSON.parse(line);
+      if (obj.type === "user" && obj.message?.content) {
+        const c = obj.message.content;
+        if (Array.isArray(c) && c[0]?.type === "tool_result") continue;
+        messages.push({ role: "user", content: typeof c === "string" ? c : JSON.stringify(c), timestamp: obj.timestamp });
+      }
+      if (obj.type === "assistant" && obj.message?.content) {
+        const blocks = Array.isArray(obj.message.content) ? obj.message.content : [obj.message.content];
+        const parts = [];
+        for (const b of blocks) {
+          if (b.type === "text" && b.text) parts.push({ type: "text", text: b.text });
+          else if (b.type === "tool_use") parts.push({ type: "tool_use", id: b.id, name: b.name, input: b.input });
+          else if (b.type === "thinking" && b.thinking) parts.push({ type: "thinking", text: b.thinking });
+        }
+        if (parts.length > 0) {
+          const last = messages[messages.length - 1];
+          if (last && last.role === "assistant") last.parts.push(...parts);
+          else messages.push({ role: "assistant", parts, timestamp: obj.timestamp });
+        }
+      }
+    }
+    return messages;
+  } catch (err) { return []; }
+});
+
+ipcMain.handle("sessions-delete", (e, id) => {
+  try {
+    const filePath = path.join(SESSIONS_DIR, id + ".jsonl");
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    return { ok: true };
+  } catch (err) { return { error: err.message }; }
+});
+
+// ── Claude CLI (IPC stream) ──
+let claudeProcess = null;
+let sessionId = null;
+
+ipcMain.on("claude-chat", (e, userText) => {
+  if (claudeProcess) { claudeProcess.removeAllListeners(); claudeProcess.kill(); claudeProcess = null; }
+  const args = ["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose", "--max-turns", "10", "--dangerously-skip-permissions"];
+  if (sessionId) args.push("--resume", sessionId);
+
+  claudeProcess = spawn(CLAUDE_CMD, args, { stdio: ["pipe", "pipe", "pipe"], shell: true });
+  let stderrBuf = "";
+  claudeProcess.stderr.on("data", c => { stderrBuf += c.toString(); });
+  claudeProcess.on("error", () => {
+    e.sender.send("claude-error", "Failed to start claude");
+  });
+  claudeProcess.on("exit", code => {
+    if (code !== 0 && code !== null) e.sender.send("claude-error", `Exit ${code}: ${stderrBuf.slice(0, 300)}`);
+  });
+
+  claudeProcess.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content: userText } }) + "\n");
+  claudeProcess.stdin.end();
+
+  const rl = readline.createInterface({ input: claudeProcess.stdout, crlfDelay: Infinity });
+  rl.on("line", line => {
+    if (!line.trim()) return;
+    try {
+      const event = JSON.parse(line);
+      if (event.type === "system" && event.subtype === "init") {
+        sessionId = event.session_id;
+        e.sender.send("claude-init", { session_id: sessionId, model: event.model });
+      } else if (event.type === "assistant") {
+        const content = event.message?.content;
+        if (!content) return;
+        for (const block of Array.isArray(content) ? content : [content]) {
+          if (block.type === "text") e.sender.send("claude-text", block.text);
+          else if (block.type === "tool_use") e.sender.send("claude-tool", { id: block.id, name: block.name, input: block.input });
+          else if (block.type === "thinking") e.sender.send("claude-thinking", block.thinking);
+        }
+      } else if (event.type === "result") {
+        sessionId = event.session_id;
+        e.sender.send("claude-done", { session_id: sessionId, cost: event.total_cost_usd, usage: event.usage });
+        claudeProcess = null;
+      }
+    } catch (e) {}
+  });
+  rl.on("close", () => {
+    if (sessionId) e.sender.send("claude-done", { session_id: sessionId });
+  });
+});
+
+ipcMain.on("claude-new-session", () => {
+  sessionId = null;
+  if (claudeProcess) { claudeProcess.kill(); claudeProcess = null; }
+});
+
+ipcMain.on("claude-resume", (e, id) => { sessionId = id; });
+
+// ── App lifecycle ──
+app.whenReady().then(() => {
+  createWindow();
+  createTray();
+});
+app.on("window-all-closed", () => { app.quit(); });
+app.on("activate", () => { if (!mainWindow) createWindow(); });

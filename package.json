@@ -1,0 +1,30 @@
+{
+  "name": "claude-code-web",
+  "version": "1.0.0",
+  "description": "Claude Code floating desktop assistant",
+  "main": "main.js",
+  "scripts": {
+    "app": "electron .",
+    "build": "electron-builder --win portable"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "^2.1.132"
+  },
+  "devDependencies": {
+    "electron": "^42.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.claudecode.web",
+    "productName": "Claude Code Web",
+    "win": {
+      "target": "portable",
+      "icon": "icon.png"
+    },
+    "files": [
+      "main.js",
+      "public/**/*",
+      "node_modules/**/*"
+    ]
+  }
+}
