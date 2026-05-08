@@ -1,6 +1,8 @@
-# Claude Code Web
+# Claude Code Web (float-chat-widget)
 
 A floating desktop assistant for [Claude Code](https://claude.ai/code), built with Electron.
+
+可悬浮的 CLI 对话框
 
 ## Features
 
@@ -18,8 +20,8 @@ A floating desktop assistant for [Claude Code](https://claude.ai/code), built wi
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/claude-code-web.git
-cd claude-code-web
+git clone https://github.com/chfabfu/float-chat-widget.git
+cd float-chat-widget
 npm install
 ```
 
