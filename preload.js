@@ -19,6 +19,11 @@ contextBridge.exposeInMainWorld("api", {
   newSession: () => ipcRenderer.send("claude-new-session"),
   resume: (id) => ipcRenderer.send("claude-resume", id),
 
+  // Ball image
+  ballGetImage: () => ipcRenderer.invoke("ball-get-image"),
+  ballPickImage: () => ipcRenderer.invoke("ball-pick-image"),
+  ballClearImage: () => ipcRenderer.send("ball-clear-image"),
+
   // Claude events
   onInit: (cb) => ipcRenderer.on("claude-init", (_, d) => cb(d)),
   onText: (cb) => ipcRenderer.on("claude-text", (_, t) => cb(t)),

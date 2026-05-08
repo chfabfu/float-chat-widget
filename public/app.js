@@ -78,10 +78,80 @@
   document.addEventListener("mouseup", () => { isDragging = false; dragHandle.style.cursor = "move"; });
 
   // ════════════════════════════════════════
-  // ── Ball mode ──
+  // ── Ball mode & ball image ──
   // ════════════════════════════════════════
 
   let isBallMode = false, ignoreMouseTimer = null;
+  const ballDefaultIcon = document.getElementById("ballDefault");
+  const ballImageEl = document.getElementById("ballImage");
+
+  // Load saved ball image on startup
+  (async () => {
+    const saved = await window.api.ballGetImage();
+    if (saved) setBallImage(saved);
+  })();
+
+  function setBallImage(src) {
+    ballImageEl.src = src;
+    ballImageEl.style.display = "block";
+    ballDefaultIcon.style.display = "none";
+  }
+
+  function clearBallImage() {
+    ballImageEl.src = "";
+    ballImageEl.style.display = "none";
+    ballDefaultIcon.style.display = "flex";
+  }
+
+  // Right-click context menu on ball
+  let ctxMenu = null;
+  function removeCtxMenu() {
+    if (ctxMenu) { ctxMenu.remove(); ctxMenu = null; }
+  }
+
+  floatBall.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    removeCtxMenu();
+    const menu = document.createElement("div");
+    menu.className = "ball-ctx-menu";
+    menu.style.left = e.clientX + "px";
+    menu.style.top = e.clientY + "px";
+
+    const pickItem = document.createElement("div");
+    pickItem.className = "ctx-item";
+    pickItem.textContent = "更换图片...";
+    pickItem.addEventListener("click", async () => {
+      removeCtxMenu();
+      const img = await window.api.ballPickImage();
+      if (img) setBallImage(img);
+    });
+    menu.appendChild(pickItem);
+
+    if (ballImageEl.style.display !== "none") {
+      const clearItem = document.createElement("div");
+      clearItem.className = "ctx-item danger";
+      clearItem.textContent = "恢复默认图标";
+      clearItem.addEventListener("click", () => {
+        removeCtxMenu();
+        clearBallImage();
+        window.api.ballClearImage();
+      });
+      menu.appendChild(clearItem);
+    }
+
+    document.body.appendChild(menu);
+    ctxMenu = menu;
+
+    // Close menu on click outside
+    const closeMenu = (ev) => {
+      if (!menu.contains(ev.target)) {
+        removeCtxMenu();
+        document.removeEventListener("mousedown", closeMenu);
+        if (isBallMode) ignoreMouseTimer = setTimeout(() => { if (isBallMode) window.api.setIgnoreMouse(true); }, 300);
+      }
+    };
+    setTimeout(() => document.addEventListener("mousedown", closeMenu), 0);
+  });
 
   ballBtn.addEventListener("click", () => {
     isBallMode = true;
@@ -95,8 +165,8 @@
     window.api.setIgnoreMouse(false);
   });
   floatBall.addEventListener("mouseleave", () => {
-    if (!isBallMode || ballDragging) return;
-    ignoreMouseTimer = setTimeout(() => { if (isBallMode) window.api.setIgnoreMouse(true); }, 200);
+    if (!isBallMode || ballDragging || ctxMenu) return;
+    ignoreMouseTimer = setTimeout(() => { if (isBallMode && !ctxMenu) window.api.setIgnoreMouse(true); }, 200);
   });
 
   function restoreFromBall() {
@@ -111,7 +181,10 @@
   }
 
   let ballDragging = false, ballDragStartX = 0, ballDragStartY = 0;
+  floatBall.addEventListener("dragstart", (e) => e.preventDefault());
+
   floatBall.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return; // only left-click for drag/restore
     ballDragging = false;
     ballDragStartX = e.clientX;
     ballDragStartY = e.clientY;
@@ -123,9 +196,10 @@
         floatBall.style.transform = "none";
       }
     };
-    const onUp = () => {
+    const onUp = (ev) => {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
+      if (ev.button !== 0) return; // only left-click restores
       if (!ballDragging) restoreFromBall();
       else ballDragging = false;
     };
@@ -245,6 +319,9 @@
     }
     if (textBuf) appendMarkdown(bubble, textBuf);
     el.appendChild(bubble);
+    addDeleteBtn(el);
+    addQuoteAllBtn(el);
+    addRegenBtn(el);
     messagesEl.appendChild(el);
     scrollToBottom();
   }
@@ -272,13 +349,69 @@
   }
   function clearWelcome() { const w = messagesEl.querySelector(".welcome"); if (w) w.remove(); }
 
+  function getActionsEl(el) {
+    let actions = el.querySelector(".msg-actions");
+    if (!actions) {
+      actions = document.createElement("div");
+      actions.className = "msg-actions";
+      el.appendChild(actions);
+    }
+    return actions;
+  }
+
+  function addDeleteBtn(el) {
+    const btn = document.createElement("button");
+    btn.textContent = "删除";
+    btn.title = "删除";
+    btn.addEventListener("click", () => el.remove());
+    getActionsEl(el).appendChild(btn);
+  }
+
   function addUserMessage(text) {
     clearWelcome();
     const el = document.createElement("div");
     el.className = "message user";
     el.innerHTML = `<div class="role">You</div><div class="bubble">${escapeHtml(text)}</div>`;
+    addDeleteBtn(el);
     messagesEl.appendChild(el);
     scrollToBottom();
+  }
+
+  function addQuoteAllBtn(el) {
+    const btn = document.createElement("button");
+    btn.textContent = "引用";
+    btn.addEventListener("click", () => {
+      const bubble = el.querySelector(".bubble");
+      if (!bubble) return;
+      const text = bubble.innerText.trim();
+      if (text) setQuote(text);
+    });
+    getActionsEl(el).appendChild(btn);
+  }
+
+  function addRegenBtn(el) {
+    const btn = document.createElement("button");
+    btn.textContent = "重新生成";
+    btn.addEventListener("click", () => {
+      // Find the previous user message
+      const prev = el.previousElementSibling;
+      if (!prev || !prev.classList.contains("user")) return;
+      const bubble = prev.querySelector(".bubble");
+      if (!bubble) return;
+      const text = bubble.textContent.trim();
+      if (!text || isGenerating) return;
+      // Remove this assistant message
+      el.remove();
+      // Resend
+      isGenerating = true;
+      generationId++;
+      activeGen = generationId;
+      sendBtn.disabled = true;
+      infoEl.textContent = "";
+      startAssistantMessage();
+      window.api.chat(text);
+    });
+    getActionsEl(el).appendChild(btn);
   }
 
   function startAssistantMessage() {
@@ -286,6 +419,9 @@
     const el = document.createElement("div");
     el.className = "message assistant";
     el.innerHTML = `<div class="role">Claude</div><div class="bubble"><div class="typing-indicator"><span></span><span></span><span></span></div></div>`;
+    addDeleteBtn(el);
+    addQuoteAllBtn(el);
+    addRegenBtn(el);
     messagesEl.appendChild(el);
     currentAssistantEl = el;
     currentBubbleEl = el.querySelector(".bubble");
@@ -384,6 +520,66 @@
   loadSessions();
 
   // ════════════════════════════════════════
+  // ── Quote feature ──
+  // ════════════════════════════════════════
+
+  let quoteBtn = null, quotedText = null, quotePreviewEl = null;
+
+  function removeQuoteBtn() {
+    if (quoteBtn) { quoteBtn.remove(); quoteBtn = null; }
+  }
+
+  messagesEl.addEventListener("mouseup", () => {
+    setTimeout(() => {
+      const sel = window.getSelection();
+      const text = sel ? sel.toString().trim() : "";
+      removeQuoteBtn();
+      if (!text || !sel.rangeCount) return;
+      const range = sel.getRangeAt(0);
+      const ancestor = range.commonAncestorContainer;
+      if (!ancestor.closest || !ancestor.closest(".bubble")) return;
+
+      const btn = document.createElement("button");
+      btn.className = "quote-btn";
+      btn.textContent = "引用";
+      const rect = range.getBoundingClientRect();
+      btn.style.left = rect.left + rect.width / 2 - 20 + "px";
+      btn.style.top = rect.top - 36 + "px";
+      btn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        removeQuoteBtn();
+        sel.removeAllRanges();
+        setQuote(text);
+      });
+      document.body.appendChild(btn);
+      quoteBtn = btn;
+    }, 0);
+  });
+
+  document.addEventListener("mousedown", (e) => {
+    if (quoteBtn && !quoteBtn.contains(e.target)) removeQuoteBtn();
+  });
+
+  function setQuote(text) {
+    quotedText = text;
+    if (!quotePreviewEl) {
+      quotePreviewEl = document.createElement("div");
+      quotePreviewEl.className = "quote-preview";
+      const footer = inputEl.closest("footer");
+      footer.insertBefore(quotePreviewEl, footer.firstChild);
+    }
+    const display = text.length > 120 ? text.slice(0, 120) + "..." : text;
+    quotePreviewEl.innerHTML = `<span>${escapeHtml(display)}</span><button class="quote-remove">&times;</button>`;
+    quotePreviewEl.querySelector(".quote-remove").addEventListener("click", clearQuote);
+    inputEl.focus();
+  }
+
+  function clearQuote() {
+    quotedText = null;
+    if (quotePreviewEl) { quotePreviewEl.remove(); quotePreviewEl = null; }
+  }
+
+  // ════════════════════════════════════════
   // ── Send message ──
   // ════════════════════════════════════════
 
@@ -395,10 +591,13 @@
     activeGen = generationId;
     sendBtn.disabled = true;
     infoEl.textContent = "";
-    addUserMessage(text);
-    startAssistantMessage();
 
-    window.api.chat(text);
+    const fullText = quotedText ? `> ${quotedText.replace(/\n/g, "\n> ")}\n\n${text}` : text;
+    addUserMessage(quotedText ? `> ${escapeHtml(quotedText)}\n\n${escapeHtml(text)}` : text);
+    startAssistantMessage();
+    clearQuote();
+
+    window.api.chat(fullText);
     inputEl.value = "";
     autoResize();
   }
@@ -417,6 +616,7 @@
     isGenerating = false;
     activeGen = 0;
     activeSessionId = null;
+    clearQuote();
     resetStats();
     showWelcome();
     loadSessions();

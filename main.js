@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, screen, ipcMain } = require("electron");
+const { app, BrowserWindow, Tray, Menu, nativeImage, screen, ipcMain, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -76,6 +76,7 @@ ipcMain.on("win-to-ball", () => {
   savedBounds = mainWindow.getBounds();
   mainWindow.setOpacity(0);
   const { x, y, width, height } = screen.getPrimaryDisplay().bounds;
+  mainWindow.setAlwaysOnTop(true, "screen-saver");
   mainWindow.setBounds({ x, y, width, height });
   mainWindow.setResizable(false);
   mainWindow.setHasShadow(false);
@@ -94,6 +95,56 @@ ipcMain.handle("win-from-ball", () => {
 ipcMain.on("set-ignore-mouse", (e, ignore) => {
   if (!mainWindow) return;
   ignore ? mainWindow.setIgnoreMouseEvents(true, { forward: true }) : mainWindow.setIgnoreMouseEvents(false);
+});
+
+// ── Ball image config ──
+const CONFIG_FILE = path.join(app.getPath("userData"), "ball-config.json");
+
+function loadBallConfig() {
+  try {
+    if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
+  } catch (e) {}
+  return {};
+}
+
+function saveBallConfig(cfg) {
+  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg), "utf-8"); } catch (e) {}
+}
+
+ipcMain.handle("ball-get-image", () => {
+  const cfg = loadBallConfig();
+  return cfg.ballImage || null;
+});
+
+ipcMain.handle("ball-pick-image", async () => {
+  const result = await dialog.showOpenDialog({
+    title: "选择悬浮球图片",
+    filters: [
+      { name: "图片", extensions: ["png", "jpg", "jpeg", "gif", "webp", "apng", "svg", "bmp", "ico"] },
+    ],
+    properties: ["openFile"],
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+  const filePath = result.filePaths[0];
+  const ext = path.extname(filePath).toLowerCase();
+  const mimeMap = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp", ".apng": "image/apng",
+    ".svg": "image/svg+xml", ".bmp": "image/bmp", ".ico": "image/x-icon",
+  };
+  const mime = mimeMap[ext] || "image/png";
+  const buf = fs.readFileSync(filePath);
+  const base64 = `data:${mime};base64,${buf.toString("base64")}`;
+  const cfg = loadBallConfig();
+  cfg.ballImage = base64;
+  saveBallConfig(cfg);
+  return base64;
+});
+
+ipcMain.on("ball-clear-image", () => {
+  const cfg = loadBallConfig();
+  delete cfg.ballImage;
+  saveBallConfig(cfg);
 });
 
 // ── Sessions API (IPC, no HTTP) ──
