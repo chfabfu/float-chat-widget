@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld("api", {
 
   // Claude CLI
   chat: (text) => ipcRenderer.send("claude-chat", text),
+  stop: () => ipcRenderer.send("claude-stop"),
+  permissionResponse: (id, approved) => ipcRenderer.send("claude-permission-response", { id, approved }),
   newSession: () => ipcRenderer.send("claude-new-session"),
   resume: (id) => ipcRenderer.send("claude-resume", id),
 
@@ -29,6 +31,7 @@ contextBridge.exposeInMainWorld("api", {
   onText: (cb) => ipcRenderer.on("claude-text", (_, t) => cb(t)),
   onTool: (cb) => ipcRenderer.on("claude-tool", (_, d) => cb(d)),
   onThinking: (cb) => ipcRenderer.on("claude-thinking", (_, t) => cb(t)),
+  onPermission: (cb) => ipcRenderer.on("claude-permission", (_, d) => cb(d)),
   onDone: (cb) => ipcRenderer.on("claude-done", (_, d) => cb(d)),
   onError: (cb) => ipcRenderer.on("claude-error", (_, msg) => cb(msg)),
 });

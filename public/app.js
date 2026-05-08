@@ -27,6 +27,7 @@
   let activeSessionId = null;
   let generationId = 0;
   let activeGen = 0;
+  let pendingSessionPreview = null; // tracks first user message for sessions not yet on disk
 
   let totalInputTokens = 0, totalOutputTokens = 0, totalCacheRead = 0, totalCacheCreation = 0, turnCount = 0;
 
@@ -215,10 +216,34 @@
 
   async function loadSessions() {
     try {
-      const sessions = await window.api.sessionsList();
+      let sessions = await window.api.sessionsList();
+      // If we have a pending session not yet on disk, inject it into the list
+      if (pendingSessionPreview && activeSessionId) {
+        const exists = sessions.some(s => s.id === activeSessionId);
+        if (!exists) {
+          sessions.unshift({ id: activeSessionId, preview: pendingSessionPreview, timestamp: new Date().toISOString() });
+        }
+      }
       renderSessions(sessions);
     } catch (e) {}
   }
+
+  // Event delegation for session list clicks
+  sessionListEl.addEventListener("click", (e) => {
+    const deleteBtn = e.target.closest(".delete-btn");
+    if (deleteBtn) {
+      e.stopPropagation();
+      const item = deleteBtn.closest(".session-item");
+      if (item && item.dataset.sessionId) {
+        deleteSession(item.dataset.sessionId, item);
+      }
+      return;
+    }
+    const sessionItem = e.target.closest(".session-item");
+    if (sessionItem && sessionItem.dataset.sessionId) {
+      resumeSession(sessionItem.dataset.sessionId);
+    }
+  });
 
   function renderSessions(sessions) {
     sessionListEl.innerHTML = "";
@@ -229,28 +254,34 @@
     for (const s of sessions) {
       const el = document.createElement("div");
       el.className = "session-item" + (s.id === activeSessionId ? " active" : "");
+      el.dataset.sessionId = s.id;
       el.innerHTML = `
         <div class="session-top">
           <div class="session-preview">${escapeHtml(s.preview || "(empty)")}</div>
           <button class="delete-btn" title="Delete">&#10005;</button>
         </div>
         <div class="session-time">${formatTime(s.timestamp)}</div>`;
-      el.querySelector(".session-top").addEventListener("click", (e) => {
-        if (e.target.closest(".delete-btn")) return;
-        resumeSession(s.id);
-      });
-      el.querySelector(".delete-btn").addEventListener("click", (e) => {
-        e.stopPropagation();
-        deleteSession(s.id, el);
-      });
       sessionListEl.appendChild(el);
     }
   }
 
   async function deleteSession(id, el) {
-    await window.api.sessionsDelete(id);
+    const result = await window.api.sessionsDelete(id);
     el.remove();
-    if (activeSessionId === id) { activeSessionId = null; resetStats(); showWelcome(); }
+    if (activeSessionId === id) {
+      activeSessionId = null;
+      pendingSessionPreview = null;
+      isGenerating = false;
+      activeGen = 0;
+      currentAssistantEl = null;
+      currentBubbleEl = null;
+      currentText = "";
+      window.api.newSession();
+      sendBtn.disabled = false;
+      hideStopBtn();
+      resetStats();
+      showWelcome();
+    }
     loadSessions();
   }
 
@@ -269,10 +300,17 @@
       isGenerating = false;
       activeGen = 0;
       sendBtn.disabled = false;
+      hideStopBtn();
     }
     activeSessionId = id;
     messagesEl.innerHTML = "";
     resetStats();
+
+    // Pending sessions don't have a file on disk yet
+    if (id.startsWith("pending-")) {
+      highlightActiveSession();
+      return;
+    }
 
     window.api.resume(id);
 
@@ -334,8 +372,9 @@
   }
 
   function highlightActiveSession() {
-    sessionListEl.querySelectorAll(".session-item").forEach(el => el.classList.remove("active"));
-    loadSessions();
+    sessionListEl.querySelectorAll(".session-item").forEach(el => {
+      el.classList.toggle("active", el.dataset.sessionId === activeSessionId);
+    });
   }
 
   // ════════════════════════════════════════
@@ -407,6 +446,7 @@
       generationId++;
       activeGen = generationId;
       sendBtn.disabled = true;
+      showStopBtn();
       infoEl.textContent = "";
       startAssistantMessage();
       window.api.chat(text);
@@ -489,23 +529,76 @@
   }
 
   function highlightAllCode(c) { c.querySelectorAll("pre code:not(.hljs)").forEach(b => hljs.highlightElement(b)); }
-  function escapeHtml(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+  const _escEl = document.createElement("div");
+  function escapeHtml(s) { _escEl.textContent = s; return _escEl.innerHTML; }
   function scrollToBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+
+  function showPermissionPrompt(d) {
+    clearWelcome();
+    const el = document.createElement("div");
+    el.className = "message assistant";
+    el.innerHTML = `<div class="role">Claude</div>`;
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.innerHTML = `
+      <div class="permission-block">
+        <div class="permission-header">&#9888; Permission Request</div>
+        <div class="permission-tool">${escapeHtml(d.tool || "unknown tool")}</div>
+        ${d.description ? `<div class="permission-desc">${escapeHtml(d.description)}</div>` : ""}
+        ${d.input ? `<div class="permission-input"><pre>${escapeHtml(JSON.stringify(d.input, null, 2))}</pre></div>` : ""}
+        <div class="permission-actions">
+          <button class="perm-approve">Approve</button>
+          <button class="perm-deny">Deny</button>
+        </div>
+      </div>`;
+    el.appendChild(bubble);
+    messagesEl.appendChild(el);
+    scrollToBottom();
+
+    bubble.querySelector(".perm-approve").addEventListener("click", () => {
+      window.api.permissionResponse(d.id, true);
+      bubble.querySelector(".permission-actions").innerHTML = '<span class="perm-result approved">&#10003; Approved</span>';
+    });
+    bubble.querySelector(".perm-deny").addEventListener("click", () => {
+      window.api.permissionResponse(d.id, false);
+      bubble.querySelector(".permission-actions").innerHTML = '<span class="perm-result denied">&#10005; Denied</span>';
+    });
+  }
 
   // ════════════════════════════════════════
   // ── Claude connection (IPC) ──
   // ════════════════════════════════════════
 
-  window.api.onInit(() => {});
+  window.api.onInit((d) => {
+    if (d.session_id) {
+      const wasPending = activeSessionId && activeSessionId.startsWith("pending-");
+      activeSessionId = d.session_id;
+      pendingSessionPreview = null;
+      if (wasPending) {
+        highlightActiveSession();
+        // Delay reload so the CLI has time to flush the session file
+        setTimeout(() => loadSessions(), 500);
+      }
+    }
+  });
   window.api.onText((t) => { if (activeGen === generationId) appendText(t); });
   window.api.onTool((d) => { if (activeGen === generationId) appendToolUse(d); });
   window.api.onThinking((t) => { if (activeGen === generationId) appendThinking(t); });
+  window.api.onPermission((d) => { if (activeGen === generationId) showPermissionPrompt(d); });
   window.api.onDone((d) => {
     if (activeGen !== generationId) return;
     activeGen = 0;
+    if (d.stopped && currentBubbleEl) {
+      const stoppedEl = document.createElement("span");
+      stoppedEl.style.cssText = "color:var(--text-muted);font-size:12px;font-style:italic;margin-left:4px";
+      stoppedEl.textContent = "[已停止]";
+      currentBubbleEl.appendChild(stoppedEl);
+    }
+    if (d.session_id) activeSessionId = d.session_id;
     finalizeAssistant(d.usage);
     isGenerating = false;
     sendBtn.disabled = false;
+    hideStopBtn();
     inputEl.focus();
   });
   window.api.onError((msg) => {
@@ -514,7 +607,9 @@
     appendText(`\n\n**Error:** ${escapeHtml(msg)}`);
     isGenerating = false;
     sendBtn.disabled = false;
+    hideStopBtn();
   });
+
   setStatus("connected", "Ready");
   sendBtn.disabled = false;
   loadSessions();
@@ -583,23 +678,78 @@
   // ── Send message ──
   // ════════════════════════════════════════
 
+  function showStopBtn() {
+    sendBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>`;
+    sendBtn.title = "Stop";
+    sendBtn.disabled = false;
+    sendBtn.classList.add("stopping");
+    sendBtn.onclick = () => {
+      window.api.stop();
+      hideStopBtn();
+    };
+  }
+
+  function hideStopBtn() {
+    sendBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>`;
+    sendBtn.title = "Send";
+    sendBtn.classList.remove("stopping");
+    sendBtn.onclick = sendMessage;
+  }
+
   function sendMessage() {
     const text = inputEl.value.trim();
     if (!text || isGenerating) return;
+
     isGenerating = true;
     generationId++;
     activeGen = generationId;
     sendBtn.disabled = true;
+    showStopBtn();
     infoEl.textContent = "";
 
-    const fullText = quotedText ? `> ${quotedText.replace(/\n/g, "\n> ")}\n\n${text}` : text;
-    addUserMessage(quotedText ? `> ${escapeHtml(quotedText)}\n\n${escapeHtml(text)}` : text);
+    addUserMessage(escapeHtml(text));
     startAssistantMessage();
     clearQuote();
+    if (!activeSessionId) {
+      activeSessionId = "pending-" + Date.now();
+      pendingSessionPreview = text.slice(0, 80);
+      highlightActiveSession();
+    }
 
-    window.api.chat(fullText);
+    if (text.startsWith("/")) {
+      const cmd = parseCommand(text);
+      window.api.chat(cmd);
+    } else {
+      const fullText = quotedText ? `> ${quotedText.replace(/\n/g, "\n> ")}\n\n${text}` : text;
+      if (quotedText) {
+        // Update displayed message to show quote
+        const lastUser = messagesEl.querySelectorAll(".message.user");
+        const lastEl = lastUser[lastUser.length - 1];
+        if (lastEl) lastEl.querySelector(".bubble").innerHTML = `&gt; ${escapeHtml(quotedText)}<br><br>${escapeHtml(text)}`;
+      }
+      window.api.chat(fullText);
+    }
     inputEl.value = "";
     autoResize();
+  }
+
+  function parseCommand(text) {
+    const parts = text.trim().split(/\s+/);
+    const cmd = parts[0].toLowerCase();
+    const arg = parts.slice(1).join(" ");
+
+    const map = {
+      "/skill": `Please invoke the Skill tool${arg ? ` with skill name "${arg}"` : ""} as requested by the user's slash command.`,
+      "/help": "Please list all available slash commands and their descriptions.",
+      "/clear": "Please clear the conversation context and start fresh.",
+      "/compact": "Please compact the conversation context.",
+      "/config": "Please show the current configuration.",
+      "/review": `Please review the code${arg ? ` in ${arg}` : ""}.`,
+      "/init": "Please initialize the project with a CLAUDE.md file.",
+      "/simplify": "Please review and simplify the changed code.",
+    };
+
+    return map[cmd] || `The user typed the slash command: ${text}\nPlease handle this command appropriately.`;
   }
 
   function autoResize() {
@@ -607,7 +757,7 @@
     inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + "px";
   }
 
-  sendBtn.addEventListener("click", sendMessage);
+  sendBtn.onclick = sendMessage;
   inputEl.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
   inputEl.addEventListener("input", autoResize);
 
@@ -616,8 +766,10 @@
     isGenerating = false;
     activeGen = 0;
     activeSessionId = null;
+    pendingSessionPreview = null;
     clearQuote();
     resetStats();
+    hideStopBtn();
     showWelcome();
     loadSessions();
   });

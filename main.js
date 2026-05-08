@@ -220,9 +220,8 @@ ipcMain.handle("sessions-delete", (e, id) => {
 let claudeProcess = null;
 let sessionId = null;
 
-ipcMain.on("claude-chat", (e, userText) => {
-  if (claudeProcess) { claudeProcess.removeAllListeners(); claudeProcess.kill(); claudeProcess = null; }
-  const args = ["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose", "--max-turns", "10", "--dangerously-skip-permissions"];
+function setupProcess(e, userText) {
+  const args = ["--output-format", "stream-json", "--input-format", "stream-json", "--verbose", "--max-turns", "10"];
   if (sessionId) args.push("--resume", sessionId);
 
   claudeProcess = spawn(CLAUDE_CMD, args, { stdio: ["pipe", "pipe", "pipe"], shell: true });
@@ -236,7 +235,6 @@ ipcMain.on("claude-chat", (e, userText) => {
   });
 
   claudeProcess.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content: userText } }) + "\n");
-  claudeProcess.stdin.end();
 
   const rl = readline.createInterface({ input: claudeProcess.stdout, crlfDelay: Infinity });
   rl.on("line", line => {
@@ -254,6 +252,8 @@ ipcMain.on("claude-chat", (e, userText) => {
           else if (block.type === "tool_use") e.sender.send("claude-tool", { id: block.id, name: block.name, input: block.input });
           else if (block.type === "thinking") e.sender.send("claude-thinking", block.thinking);
         }
+      } else if (event.type === "permission_request") {
+        e.sender.send("claude-permission", { id: event.id, tool: event.tool, input: event.input, description: event.description });
       } else if (event.type === "result") {
         sessionId = event.session_id;
         e.sender.send("claude-done", { session_id: sessionId, cost: event.total_cost_usd, usage: event.usage });
@@ -264,6 +264,25 @@ ipcMain.on("claude-chat", (e, userText) => {
   rl.on("close", () => {
     if (sessionId) e.sender.send("claude-done", { session_id: sessionId });
   });
+}
+
+ipcMain.on("claude-chat", (e, userText) => {
+  if (claudeProcess) { claudeProcess.removeAllListeners(); claudeProcess.kill(); claudeProcess = null; }
+  setupProcess(e, userText);
+});
+
+ipcMain.on("claude-permission-response", (e, { id, approved }) => {
+  if (!claudeProcess) return;
+  claudeProcess.stdin.write(JSON.stringify({ type: "permission_response", id, approved }) + "\n");
+});
+
+ipcMain.on("claude-stop", (e) => {
+  if (claudeProcess) {
+    claudeProcess.removeAllListeners();
+    claudeProcess.kill();
+    claudeProcess = null;
+    e.sender.send("claude-done", { session_id: sessionId, stopped: true });
+  }
 });
 
 ipcMain.on("claude-new-session", () => {
